@@ -1,0 +1,18 @@
+{
+  "compilerOptions": {
+    "lib": ["dom", "dom.iterable", "esnext"],
+    "target": "esnext"
+  },
+  "imports": {
+    "c_ide/": "./pkg/"
+  },
+  "tasks": {
+    "dev": "deno run --allow-net --allow-read --allow-env server.ts",
+    "build": "deno run --allow-run --allow-write build.ts",
+    "serve": "deno run --allow-net --allow-read server.ts"
+  },
+  "theme": "dark",
+  "fontSize": 14,
+  "tabSize": 2,
+  "autoSave": true
+} 
