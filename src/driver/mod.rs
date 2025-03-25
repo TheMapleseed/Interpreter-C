@@ -2,6 +2,12 @@
 use std::sync::Arc;
 use std::path::{Path, PathBuf};
 use std::collections::HashMap;
+use parking_lot::RwLock;
+use tokio::sync::mpsc;
+
+// New imports for architecture support
+use crate::arch::{Architecture, ArchitectureRegistry};
+use crate::compiler::{CompilerSystem, CompilerOptions, AssemblyOptions, LinkOptions};
 
 pub struct CompilerDriver {
     // Core components

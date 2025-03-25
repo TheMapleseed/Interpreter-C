@@ -8,6 +8,9 @@ use llvm_sys::target::*;
 use llvm_sys::execution_engine::*;
 use std::ffi::{CString, CStr};
 
+// New imports for architecture support
+use crate::arch::{Architecture, ArchitectureRegistry};
+
 pub struct CompilerSystem {
     // Core compilation components
     frontend: Frontend,
@@ -24,6 +27,10 @@ pub struct CompilerSystem {
     
     // ABI handling
     abi_handler: ABIHandler,
+    
+    // Architecture support
+    architecture_registry: Arc<ArchitectureRegistry>,
+    current_architecture: Architecture,
 }
 
 impl CompilerSystem {
@@ -35,6 +42,12 @@ impl CompilerSystem {
         LLVM_InitializeAllAsmParsers();
         LLVM_InitializeAllAsmPrinters();
         
+        // Create architecture registry
+        let architecture_registry = Arc::new(ArchitectureRegistry::new());
+        
+        // Determine architecture from target triple
+        let arch = Self::determine_architecture_from_triple(target_triple)?;
+        
         // Create target machine
         let target_machine = Self::create_target_machine(target_triple)?;
         let target_data = LLVMCreateTargetDataLayout(target_machine);
@@ -42,13 +55,28 @@ impl CompilerSystem {
         Ok(CompilerSystem {
             frontend: Frontend::new()?,
             middle_end: MiddleEnd::new()?,
-            backend: Backend::new(target_machine)?,
+            backend: Backend::new(target_machine, arch)?,
             target_machine,
             target_data,
             runtime: RuntimeSystem::new()?,
             linker: Linker::new()?,
             abi_handler: ABIHandler::new(target_data)?,
+            architecture_registry,
+            current_architecture: arch,
         })
+    }
+
+    /// Determine the architecture from the target triple
+    unsafe fn determine_architecture_from_triple(target_triple: &str) -> Result<Architecture, CompilerError> {
+        if target_triple.starts_with("x86_64") {
+            Ok(Architecture::X86_64)
+        } else if target_triple.starts_with("aarch64") || target_triple.starts_with("arm64") {
+            Ok(Architecture::AArch64)
+        } else if target_triple.starts_with("arm") {
+            Ok(Architecture::Arm)
+        } else {
+            Err(CompilerError::UnsupportedArchitecture(target_triple.to_string()))
+        }
     }
 
     pub unsafe fn compile_file(
@@ -101,6 +129,36 @@ impl CompilerSystem {
         
         Ok(code_ptr)
     }
+    
+    /// Compile assembly code directly
+    pub unsafe fn compile_assembly(
+        &self,
+        asm_code: &str,
+        output_file: &str,
+        options: &AssemblyOptions
+    ) -> Result<(), CompilerError> {
+        // Get architecture support
+        let arch_support = self.architecture_registry.get_support(options.target_architecture.unwrap_or(self.current_architecture))
+            .ok_or_else(|| CompilerError::UnsupportedArchitecture(format!("{:?}", options.target_architecture)))?;
+        
+        // Parse assembly code
+        let asm_ast = arch_support.asm_parser.parse(asm_code)
+            .map_err(|e| CompilerError::AssemblyParsingError(format!("{:?}", e)))?;
+        
+        // Encode assembly into machine code
+        let encoded = arch_support.instruction_encoder.encode_asm_block(&asm_ast.blocks[0])
+            .map_err(|e| CompilerError::AssemblyEncodingError(format!("{:?}", e)))?;
+        
+        // Create object file
+        let obj_file = self.backend.create_object_file_from_machine_code(&encoded, output_file)?;
+        
+        // Link if needed
+        if options.link {
+            self.linker.link(obj_file, output_file, &options.link_options)?;
+        }
+        
+        Ok(())
+    }
 
     unsafe fn create_target_machine(
         target_triple: &str
@@ -151,6 +209,7 @@ pub struct CompilerOptions {
     pub link_options: LinkOptions,
     pub debug_info: bool,
     pub target_features: Vec<String>,
+    pub target_architecture: Option<Architecture>,
 }
 
 #[derive(Debug)]
@@ -159,6 +218,14 @@ pub struct JITOptions {
     pub enable_fast_isel: bool,
     pub enable_guard_pages: bool,
     pub stack_size: usize,
+    pub target_architecture: Option<Architecture>,
+}
+
+#[derive(Debug)]
+pub struct AssemblyOptions {
+    pub link: bool,
+    pub link_options: LinkOptions,
+    pub target_architecture: Option<Architecture>,
 }
 
 #[derive(Debug)]
@@ -174,6 +241,9 @@ pub enum CompilerError {
     InvalidTargetTriple,
     TargetInitialization(String),
     TargetMachineCreation,
+    UnsupportedArchitecture(String),
+    AssemblyParsingError(String),
+    AssemblyEncodingError(String),
     Frontend(FrontendError),
     MiddleEnd(MiddleEndError),
     Backend(BackendError),
@@ -200,6 +270,7 @@ fn main() -> Result<(), CompilerError> {
             },
             debug_info: true,
             target_features: vec!["+sse4.2".to_string()],
+            target_architecture: None,
         };
 
         compiler.compile_file("input.c", "output", &options)?;
@@ -210,6 +281,7 @@ fn main() -> Result<(), CompilerError> {
             enable_fast_isel: true,
             enable_guard_pages: true,
             stack_size: 8 * 1024 * 1024,
+            target_architecture: None,
         };
 
         let code = r#"
@@ -223,6 +295,30 @@ fn main() -> Result<(), CompilerError> {
         // Use the JIT compiled function
         let add_func: extern "C" fn(i32, i32) -> i32 = std::mem::transmute(func_ptr);
         println!("Result: {}", add_func(2, 3));
+
+        // Direct assembly compilation
+        let asm_options = AssemblyOptions {
+            link: true,
+            link_options: LinkOptions {
+                libraries: vec!["c".to_string()],
+                library_paths: vec![],
+                static_link: false,
+                strip_symbols: false,
+            },
+            target_architecture: Some(Architecture::X86_64),
+        };
+
+        let asm_code = r#"
+            .text
+            .global add
+            .type add, @function
+        add:
+            add %edi, %esi
+            mov %esi, %eax
+            ret
+        "#;
+
+        compiler.compile_assembly(asm_code, "asm_output", &asm_options)?;
 
         Ok(())
     }
